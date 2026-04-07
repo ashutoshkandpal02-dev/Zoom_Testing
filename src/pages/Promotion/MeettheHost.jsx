@@ -3,7 +3,7 @@ import {
   Terminal, Layers, UserPlus, MessageCircle,
   Zap, Star, ShieldCheck, ChevronRight, Activity, Cpu
 } from 'lucide-react';
-import paulImg from "../../assets/promotion/paul.png";
+import paulImg from "../../assets/Promotion/paul.png";
 
 const MeetTheHostRedesign = () => {
   const agendaItems = [
