@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 
 import img from "../../assets/promotion/paul.png";
+//hello
 
 const TRAILER_VIDEO_URL = "https://athena-user-assets.s3.eu-north-1.amazonaws.com/promotional/lesson_editor.mp4";
 
