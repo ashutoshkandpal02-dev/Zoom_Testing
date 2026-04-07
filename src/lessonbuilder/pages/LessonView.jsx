@@ -1,0 +1,921 @@
+import React, { useState, useEffect, useMemo, useContext } from "react";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardFooter,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import {
+  ChevronLeft,
+  Clock,
+  Play,
+  FileText,
+  AlertCircle,
+  Search,
+  RefreshCw,
+  ArrowLeft,
+  ChevronRight,
+  FolderOpen,
+  MessageSquare,
+  GraduationCap,
+} from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { useToast } from "@/hooks/use-toast";
+import { fetchCourseById, fetchCourseModules } from "@/services/courseService";
+import { getAuthHeader } from "@/services/authHeader";
+import {
+  updateLessonProgress,
+} from "@/services/progressService";
+import { SidebarContext } from "@/layouts/DashboardLayout";
+import axios from "axios";
+import devLogger from "@lessonbuilder/utils/devLogger";
+import LessonCompletionFeedback from "@/components/lesson/LessonCompletionFeedback";
+
+const LessonView = () => {
+  const { courseId, moduleId } = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { toast } = useToast();
+  const { setSidebarCollapsed } = useContext(SidebarContext);
+
+  devLogger.debug("LessonView rendered with params:", { courseId, moduleId });
+
+  const [lessons, setLessons] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [moduleDetails, setModuleDetails] = useState(null);
+  const [courseDetails, setCourseDetails] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [loadingLesson, setLoadingLesson] = useState(null); // Track which lesson is being loaded
+
+  // Progress tracking state - REMOVED: All progress comes from backend
+  // Only keep minimal UI state for display purposes
+  const [currentLessonProgress, setCurrentLessonProgress] = useState(null);
+  const [currentLessonId, setCurrentLessonId] = useState(null);
+
+  // Store progress for all lessons (from backend)
+  const [lessonsProgress, setLessonsProgress] = useState({}); // { lessonId: { progress, completed } }
+
+  // Feedback dialog state
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState({}); // { lessonId: boolean }
+
+  // Fetch module and lessons data
+  useEffect(() => {
+    devLogger.debug(
+      "LessonView component mounted with courseId:",
+      courseId,
+      "moduleId:",
+      moduleId,
+    );
+
+    // Check if we have data from navigation state (OPTIMIZATION)
+    const navigationState = location.state;
+    if (navigationState?.moduleData && navigationState?.courseData) {
+      devLogger.debug("Using navigation state data - avoiding 2 API calls!");
+
+      // Use passed data instead of API calls
+      setCourseDetails(navigationState.courseData);
+      setModuleDetails(navigationState.moduleData);
+
+      // Only fetch lessons (1 API call instead of 3)
+      if (courseId && moduleId) {
+        fetchLessonsOnly();
+      }
+    } else {
+      devLogger.debug(
+        "No navigation state data - falling back to full API calls",
+      );
+      // Fallback to current approach if no state data
+      if (courseId && moduleId) {
+        fetchModuleLessons();
+      }
+    }
+  }, [courseId, moduleId, location.state]);
+
+  const fetchModuleLessons = async () => {
+    try {
+      setLoading(true);
+      devLogger.debug(
+        "Fetching lessons for courseId:",
+        courseId,
+        "moduleId:",
+        moduleId,
+      );
+
+      // Use Promise.allSettled to handle course and modules independently
+      // This way, if course details fail, we can still load lessons
+      const [courseResult, modulesResult] = await Promise.allSettled([
+        fetchCourseById(courseId),
+        fetchCourseModules(courseId),
+      ]);
+
+      // Extract course data from result
+      let courseData = null;
+      if (courseResult.status === "fulfilled") {
+        // Handle response format: { code: 200, data: {...}, success: true, message: "..." }
+        courseData = courseResult.value?.data || courseResult.value;
+      } else {
+        console.error("Failed to fetch course details:", courseResult.reason);
+      }
+
+      // Extract modules data from result
+      let modulesData = [];
+      if (modulesResult.status === "fulfilled") {
+        modulesData = modulesResult.value || [];
+      } else {
+        console.error("Failed to fetch modules:", modulesResult.reason);
+      }
+
+      devLogger.debug("Course data:", courseData);
+      devLogger.debug("Modules data:", modulesData);
+
+      // Set course details
+      if (courseData) {
+        setCourseDetails({
+          title:
+            courseData.title ||
+            courseData.course_title ||
+            courseData.name ||
+            "Course",
+          description:
+            courseData.description || courseData.course_description || "",
+        });
+      } else {
+        // Set default course details so the page can still render
+        setCourseDetails({
+          title: "Course",
+          description: "",
+        });
+      }
+
+      // Handle modules result - use the already extracted modulesData
+      if (modulesData && modulesData.length > 0) {
+        console.log("Modules data:", modulesData);
+
+        // Find the specific module from the modules data
+        const currentModule = modulesData.find(
+          (module) =>
+            module.id?.toString() === moduleId?.toString() ||
+            module.module_id?.toString() === moduleId?.toString(),
+        );
+
+        console.log("Current module:", currentModule);
+
+        if (currentModule) {
+          setModuleDetails({
+            title:
+              currentModule.title ||
+              currentModule.module_title ||
+              currentModule.name ||
+              "Module",
+            description:
+              currentModule.description ||
+              currentModule.module_description ||
+              "",
+            totalModules: modulesData.length || 0,
+            duration:
+              currentModule.estimated_duration || currentModule.duration || 0,
+          });
+        } else {
+          setModuleDetails({
+            title: "Module",
+            description: "",
+            totalModules: 0,
+            duration: 0,
+          });
+        }
+      } else {
+        // Set default module details
+        setModuleDetails({
+          title: "Module",
+          description: "",
+          totalModules: 0,
+          duration: 0,
+        });
+      }
+
+      // Fetch lessons - this should proceed even if course/module details failed
+      const lessonsResponse = await axios.get(
+        `${import.meta.env.VITE_API_BASE_URL}/api/course/${courseId}/modules/${moduleId}/lesson/all-lessons`,
+        {
+          headers: getAuthHeader(),
+          withCredentials: true,
+        },
+      );
+
+      devLogger.debug("Lessons response:", lessonsResponse.data);
+
+      // Handle lessons response
+      let lessonsData = [];
+      if (Array.isArray(lessonsResponse.data)) {
+        lessonsData = lessonsResponse.data;
+      } else if (lessonsResponse.data?.data) {
+        lessonsData = Array.isArray(lessonsResponse.data.data)
+          ? lessonsResponse.data.data
+          : [lessonsResponse.data.data];
+      } else if (lessonsResponse.data?.lessons) {
+        lessonsData = Array.isArray(lessonsResponse.data.lessons)
+          ? lessonsResponse.data.lessons
+          : [lessonsResponse.data.lessons];
+      }
+
+      // Normalize lesson data to ensure consistent field names
+      const normalizedLessons = lessonsData.map((lesson) => ({
+        id: lesson.id || lesson.lesson_id,
+        title: lesson.title || lesson.lesson_title || "Untitled Lesson",
+        description:
+          lesson.description ||
+          lesson.lesson_description ||
+          "No description available.",
+        order: lesson.order || lesson.lesson_order || 0,
+        status: lesson.status || lesson.lesson_status || "DRAFT",
+        duration: lesson.duration || lesson.lesson_duration || "0 min",
+        thumbnail: lesson.thumbnail || lesson.lesson_thumbnail || null,
+        progress: lesson.progress || 0,
+        completed: lesson.completed || false,
+        updatedAt:
+          lesson.updatedAt ||
+          lesson.updated_at ||
+          lesson.createdAt ||
+          lesson.created_at,
+        type: lesson.type || lesson.lesson_type || "text",
+      }));
+
+      // Filter to only show published lessons
+      const publishedLessons = normalizedLessons.filter(
+        (lesson) =>
+          lesson.status && lesson.status.toUpperCase() === "PUBLISHED",
+      );
+
+      // Sort lessons by order
+      publishedLessons.sort((a, b) => (a.order || 0) - (b.order || 0));
+
+      setLessons(publishedLessons);
+
+      // Directly update progress state from consolidated data
+      const progressMap = publishedLessons.reduce((acc, lesson) => {
+        acc[lesson.id] = {
+          progress: lesson.progress,
+          completed: lesson.completed,
+        };
+        return acc;
+      }, {});
+
+      setLessonsProgress(progressMap);
+    } catch (err) {
+      devLogger.error("Error fetching lessons:", err);
+      setError("Failed to load lessons. Please try again later.");
+      toast({
+        title: "Error",
+        description: "Failed to load lessons. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+
+  const fetchLessonsOnly = async () => {
+    try {
+      setLoading(true);
+      devLogger.debug(
+        "Fetching lessons only for courseId:",
+        courseId,
+        "moduleId:",
+        moduleId,
+      );
+
+      // Only fetch lessons (1 API call)
+      const lessonsResponse = await axios.get(
+        `${import.meta.env.VITE_API_BASE_URL}/api/course/${courseId}/modules/${moduleId}/lesson/all-lessons`,
+        {
+          headers: getAuthHeader(),
+          withCredentials: true,
+        },
+      );
+
+      devLogger.debug("Lessons response:", lessonsResponse.data);
+
+      // Handle lessons response (same logic as fetchModuleLessons)
+      let lessonsData = [];
+      if (Array.isArray(lessonsResponse.data)) {
+        lessonsData = lessonsResponse.data;
+      } else if (lessonsResponse.data?.data) {
+        lessonsData = Array.isArray(lessonsResponse.data.data)
+          ? lessonsResponse.data.data
+          : [lessonsResponse.data.data];
+      } else if (lessonsResponse.data?.lessons) {
+        lessonsData = Array.isArray(lessonsResponse.data.lessons)
+          ? lessonsResponse.data.lessons
+          : [lessonsResponse.data.lessons];
+      }
+
+      // Normalize lesson data to ensure consistent field names
+      const normalizedLessons = lessonsData.map((lesson) => ({
+        id: lesson.id || lesson.lesson_id,
+        title: lesson.title || lesson.lesson_title || "Untitled Lesson",
+        description:
+          lesson.description ||
+          lesson.lesson_description ||
+          "No description available.",
+        order: lesson.order || lesson.lesson_order || 0,
+        status: lesson.status || lesson.lesson_status || "DRAFT",
+        duration: lesson.duration || lesson.lesson_duration || "0 min",
+        thumbnail: lesson.thumbnail || lesson.lesson_thumbnail || null,
+        updatedAt:
+          lesson.updatedAt ||
+          lesson.updated_at ||
+          lesson.createdAt ||
+          lesson.created_at,
+        type: lesson.type || lesson.lesson_type || "text",
+      }));
+
+      // Filter to only show published lessons
+      const publishedLessons = normalizedLessons.filter(
+        (lesson) =>
+          lesson.status && lesson.status.toUpperCase() === "PUBLISHED",
+      );
+
+      // Sort lessons by order
+      publishedLessons.sort((a, b) => (a.order || 0) - (b.order || 0));
+
+      setLessons(publishedLessons);
+
+      // Directly update progress state from consolidated data
+      const progressMap = publishedLessons.reduce((acc, lesson) => {
+        acc[lesson.id] = {
+          progress: lesson.progress,
+          completed: lesson.completed,
+        };
+        return acc;
+      }, {});
+
+      setLessonsProgress(progressMap);
+    } catch (err) {
+      devLogger.error("Error fetching lessons:", err);
+      setError("Failed to load lessons. Please try again later.");
+      toast({
+        title: "Error",
+        description: "Failed to load lessons. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Only fetch if we have a current lesson ID
+  // Progress is already fetched in handleViewLesson when user clicks "View Lesson"
+  // No need to fetch again here
+
+  // REMOVED: Progress update and navigation functions
+  // Progress is now managed entirely by LessonPreview component via useLessonProgressTracker hook
+
+  const filteredLessons = useMemo(() => {
+    if (!lessons || !Array.isArray(lessons) || lessons.length === 0) {
+      return [];
+    }
+
+    const query = searchQuery.toLowerCase().trim();
+    if (!query) return lessons;
+
+    return lessons.filter((lesson) => {
+      if (!lesson) return false;
+      const title = (lesson.title || "").toLowerCase();
+      const description = (lesson.description || "").toLowerCase();
+      return title.includes(query) || description.includes(query);
+    });
+  }, [lessons, searchQuery]);
+
+  const handleViewLesson = async (lesson) => {
+    // Show loader for clicked lesson
+    setLoadingLesson(lesson.id);
+
+    try {
+      // Fetch lesson content to check for SCORM URL and get lesson structure
+      const baseUrl =
+        import.meta.env.VITE_API_BASE_URL || "http://localhost:9000";
+      const response = await fetch(
+        `${baseUrl}/api/lessoncontent/${lesson.id}`,
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("token")}`,
+          },
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch lesson content");
+      }
+
+      const lessonContent = await response.json();
+      const scormUrl = lessonContent.data?.scorm_url || lessonContent.data?.scormUrl;
+
+      if (scormUrl && scormUrl.trim()) {
+        // If SCORM URL exists, open it in a new tab
+        window.open(scormUrl, "_blank", "noopener,noreferrer");
+
+        toast({
+          title: "Opening SCORM Content",
+          description: "The lesson will open in a new tab.",
+        });
+      } else {
+        // If no SCORM URL, navigate to lesson preview with progress information
+        devLogger.debug(
+          "No SCORM URL found, navigating to preview page with progress",
+        );
+
+        // 1. Navigate immediately (FAST) with progress data
+        navigate(
+          `/courses/${courseId}/modules/${moduleId}/lessons/${lesson.id}/preview`,
+          {
+            state: {
+              lessonProgress: lessonsProgress[lesson.id],
+              fromLessonView: true,
+            },
+          }
+        );
+
+      }
+    } catch (error) {
+      devLogger.error("Error fetching lesson content:", error);
+      toast({
+        title: "Error",
+        description: "Failed to load lesson content. Please try again.",
+        variant: "destructive",
+      });
+
+      // Fallback to original navigation if API call fails
+      navigate(
+        `/courses/${courseId}/modules/${moduleId}/lessons/${lesson.id}/preview`
+      );
+    } finally {
+      setLoadingLesson(null);
+    }
+  };
+
+  // const getStatusColor = (status) => {
+  //   switch (status?.toUpperCase()) {
+  //     case 'PUBLISHED':
+  //       return 'default';
+  //     case 'DRAFT':
+  //       return 'secondary';
+  //     case 'COMPLETED':
+  //       return 'success';
+  //     default:
+  //       return 'secondary';
+  //   }
+  // };
+
+  // const getStatusIcon = (status) => {
+  //   switch (status?.toUpperCase()) {
+  //     case 'PUBLISHED':
+  //       return <Play className="h-4 w-4" />;
+  //     case 'COMPLETED':
+  //       return <Clock className="h-4 w-4" />;
+  //     default:
+  //       return <FileText className="h-4 w-4" />;
+  //   }
+  // };
+
+  const LessonCardSkeleton = () => (
+    <Card className="hover:shadow-lg transition-shadow duration-200 overflow-hidden">
+      <div className="relative h-48 bg-gray-200 overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+      </div>
+      <CardHeader className="pb-3">
+        <div className="h-6 bg-gray-200 rounded-md w-3/4 mb-2 overflow-hidden relative">
+          <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+        </div>
+        <div className="h-4 bg-gray-200 rounded-md w-1/2 overflow-hidden relative">
+          <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+        </div>
+      </CardHeader>
+      <CardContent className="pb-4">
+        <div className="space-y-2">
+          <div className="h-4 bg-gray-200 rounded-md w-full overflow-hidden relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+          </div>
+          <div className="h-4 bg-gray-200 rounded-md w-full overflow-hidden relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+          </div>
+          <div className="h-4 bg-gray-200 rounded-md w-5/6 overflow-hidden relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+          </div>
+        </div>
+      </CardContent>
+      <CardFooter className="pt-0">
+        <div className="h-10 bg-gray-200 rounded-md w-full overflow-hidden relative">
+          <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+        </div>
+      </CardFooter>
+    </Card>
+  );
+
+  if (loading) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="flex items-center gap-2 mb-6">
+          <div className="h-8 bg-gray-200 rounded-md w-32 overflow-hidden relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+          </div>
+          <div className="h-4 w-4 bg-gray-200 rounded" />
+          <div className="h-4 bg-gray-200 rounded-md w-48 overflow-hidden relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+          </div>
+        </div>
+
+        <div className="mb-8">
+          <div className="h-9 bg-gray-200 rounded-md w-2/3 mb-4 overflow-hidden relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+          </div>
+          <div className="space-y-2 mb-4">
+            <div className="h-4 bg-gray-200 rounded-md w-full overflow-hidden relative">
+              <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+            </div>
+            <div className="h-4 bg-gray-200 rounded-md w-5/6 overflow-hidden relative">
+              <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-4 mb-6">
+            {[1, 2].map((key) => (
+              <div
+                key={key}
+                className="flex items-center gap-2 bg-gray-100 px-4 py-2 rounded-lg min-w-[180px]"
+              >
+                <div className="w-8 h-8 bg-gray-200 rounded-lg overflow-hidden relative">
+                  <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+                </div>
+                <div className="space-y-2">
+                  <div className="h-3 bg-gray-200 rounded w-20 overflow-hidden relative">
+                    <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+                  </div>
+                  <div className="h-3 bg-gray-200 rounded w-12 overflow-hidden relative">
+                    <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className="h-5 w-5 bg-gray-200 rounded" />
+            <div className="h-4 bg-gray-200 rounded-md w-32 overflow-hidden relative">
+              <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+            </div>
+          </div>
+          <div className="relative w-full sm:w-96 h-10 bg-gray-200 rounded-md overflow-hidden">
+            <div className="absolute inset-0 bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 animate-shimmer bg-[length:200%_100%]" />
+          </div>
+        </div>
+
+        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {[...Array(6)].map((_, index) => (
+            <LessonCardSkeleton key={index} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      {/* Breadcrumb Navigation */}
+      <div className="flex items-center gap-2 mb-6">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => navigate("/dashboard/courses")}
+          className="flex items-center gap-2 text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft size={16} />
+          Back to Courses
+        </Button>
+        <ChevronRight size={16} className="text-muted-foreground" />
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => navigate(`/dashboard/courses/${courseId}`)}
+          className="text-muted-foreground hover:text-foreground text-sm"
+        >
+          {courseDetails?.title || "Course"}
+        </Button>
+        <ChevronRight size={16} className="text-muted-foreground" />
+        <span className="text-sm font-medium">
+          {moduleDetails?.title || "Module Lessons"}
+        </span>
+      </div>
+
+      {/* Module Header */}
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">
+          {moduleDetails?.title || "Module Lessons"}
+        </h1>
+        {moduleDetails?.description && (
+          <p className="text-gray-600 text-lg mb-4">
+            {moduleDetails.description}
+          </p>
+        )}
+
+        {/* Module Stats */}
+        <div className="flex flex-wrap gap-4 mb-6">
+          <div className="flex items-center gap-2 bg-green-50 px-4 py-2 rounded-lg">
+            <div className="w-8 h-8 bg-green-500 rounded-lg flex items-center justify-center text-white font-semibold text-sm">
+              {lessons.length}
+            </div>
+            <div>
+              <div className="text-sm font-medium text-green-700">
+                Total Lessons
+              </div>
+              <div className="text-xs text-green-600">{lessons.length}</div>
+            </div>
+          </div>
+
+          {/* <div className="flex items-center gap-2 bg-purple-50 px-4 py-2 rounded-lg">
+            <div className="w-8 h-8 bg-purple-500 rounded-lg flex items-center justify-center text-white font-semibold text-sm">
+              <Clock className="h-4 w-4" />
+            </div>
+            <div>
+              <div className="text-sm font-medium text-purple-700">
+                Duration
+              </div>
+              <div className="text-xs text-purple-600">
+                {moduleDetails?.duration || '0'} hr
+              </div>
+            </div>
+          </div> */}
+        </div>
+      </div>
+
+      {/* Search and Total Count */}
+      <div className="mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div className="flex items-center gap-2 text-gray-600">
+          <Clock className="h-5 w-5" />
+          <span>Total Lessons: {filteredLessons.length}</span>
+        </div>
+
+        <div className="relative w-full sm:w-96">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+          <Input
+            type="text"
+            placeholder="Search lessons..."
+            className="pl-10 w-full"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {/* Loading State */}
+      {error ? (
+        <div className="text-center p-6 bg-red-50 rounded-lg">
+          <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
+          <h3 className="text-lg font-medium text-red-900 mb-2">
+            Error Loading Lessons
+          </h3>
+          <p className="text-red-700 mb-4">{error}</p>
+          <Button variant="outline" onClick={fetchModuleLessons}>
+            <RefreshCw className="mr-2 h-4 w-4" /> Try Again
+          </Button>
+        </div>
+      ) : filteredLessons.length > 0 ? (
+        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {filteredLessons.map((lesson, index) => (
+            <Card
+              key={lesson.id || `lesson-${index}`}
+              className="hover:shadow-lg transition-shadow duration-200 overflow-hidden"
+            >
+              {/* Lesson Thumbnail */}
+              <div className="relative">
+                <div className="h-48 bg-gradient-to-br from-blue-500 to-purple-600">
+                  {lesson.thumbnail ? (
+                    <img
+                      src={lesson.thumbnail}
+                      alt={lesson.title}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <div className="text-white text-center">
+                        <div className="text-4xl font-bold mb-2">
+                          LESSON {lesson.order}
+                        </div>
+                        <div className="text-sm opacity-80">
+                          {lesson.type?.toUpperCase() || "LESSON"}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Feedback Button - Show only for completed lessons */}
+                {(() => {
+                  const lessonProgressData = lessonsProgress[lesson.id];
+                  const progressValue = lessonProgressData?.progress || 0;
+                  const isCompleted =
+                    lessonProgressData?.completed || progressValue >= 100;
+
+                  if (isCompleted) {
+                    return (
+                      <div className="absolute bottom-2 right-2">
+                        <button
+                          onClick={() =>
+                            setFeedbackDialogOpen((prev) => ({
+                              ...prev,
+                              [lesson.id]: true,
+                            }))
+                          }
+                          className="w-10 h-10 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 hover:shadow-xl transition-all duration-200 hover:scale-110"
+                          title="Provide Feedback"
+                        >
+                          <MessageSquare className="h-5 w-5 text-blue-600" />
+                        </button>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg line-clamp-2">
+                  {lesson.title}
+                </CardTitle>
+              </CardHeader>
+
+              <CardContent className="pb-4">
+                <p className="text-sm text-gray-600 line-clamp-3 mb-4">
+                  {lesson.description}
+                </p>
+
+                {/* <div className="flex items-center justify-between text-xs text-gray-500 mb-4">
+                  <span className="flex items-center gap-1">
+                    <FileText className="h-3 w-3" />
+                    Order: {lesson.order}
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <Clock className="h-3 w-3" />
+                    {lesson.duration}
+                  </span>
+                </div> */}
+
+                {/* {lesson.updatedAt && (
+                  <div className="text-xs text-gray-400">
+                    Updated: {new Date(lesson.updatedAt).toLocaleDateString()}
+                  </div>
+                )} */}
+
+                {/* Progress Bar - Backend Progress Only */}
+                {(() => {
+                  // Get progress from backend data (lessonsProgress state)
+                  const lessonProgressData = lessonsProgress[lesson.id];
+                  const progressValue = lessonProgressData?.progress || 0;
+                  const isCompleted =
+                    lessonProgressData?.completed || progressValue >= 100;
+                  const isNotStarted = progressValue === 0 && !isCompleted;
+
+                  // Always show progress bar, even for 0% progress
+                  return (
+                    <div className="mt-4 p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-gray-700">
+                          Progress
+                        </span>
+                        <span className="text-sm font-bold text-blue-600">
+                          {Math.round(progressValue)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div
+                          className={`h-2 rounded-full transition-all duration-300 ${isCompleted
+                            ? "bg-green-600"
+                            : isNotStarted
+                              ? "bg-gray-400"
+                              : "bg-blue-600"
+                            }`}
+                          style={{
+                            width: `${Math.min(100, Math.max(0, progressValue))}%`,
+                          }}
+                        ></div>
+                      </div>
+                      <div className="flex items-center justify-between mt-2 text-xs text-gray-600">
+                        <span
+                          className={`font-medium ${isCompleted
+                            ? "text-green-600"
+                            : isNotStarted
+                              ? "text-gray-500"
+                              : "text-blue-600"
+                            }`}
+                        >
+                          {isCompleted
+                            ? "Completed"
+                            : isNotStarted
+                              ? "Not Started"
+                              : "In Progress"}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </CardContent>
+
+              {/* Feedback Dialog */}
+              <LessonCompletionFeedback
+                lessonId={lesson.id}
+                open={feedbackDialogOpen[lesson.id] || false}
+                onOpenChange={(open) =>
+                  setFeedbackDialogOpen((prev) => ({
+                    ...prev,
+                    [lesson.id]: open,
+                  }))
+                }
+              />
+
+              <CardFooter className="pt-0 flex flex-col gap-2">
+                <Button
+                  className="w-full flex items-center justify-center gap-2"
+                  disabled={loadingLesson === lesson.id}
+                  onClick={() => handleViewLesson(lesson)}
+                >
+                  {loadingLesson === lesson.id ? (
+                    "Opening..."
+                  ) : (
+                    <>
+                      <Play className="h-4 w-4" />
+                      Start Lesson
+                    </>
+                  )}
+                </Button>
+
+                <Button
+                  variant="outline"
+                  className="w-full flex items-center justify-center gap-2"
+                  onClick={() =>
+                    navigate(
+                      `/dashboard/courses/${courseId}/modules/${moduleId}/lessons/${lesson.id}/resources`,
+                    )
+                  }
+                >
+                  <FolderOpen className="h-4 w-4" /> View Resources
+                </Button>
+                <Button
+                  className="w-full bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-700 hover:border-indigo-700 transition-colors duration-200"
+                  onClick={() =>
+                    navigate(
+                      `/dashboard/quiz/lessons/${lesson.id}?module=${moduleId}`,
+                    )
+                  }
+                >
+                  <GraduationCap className="h-4 w-4 mr-2" />
+                  <span className="font-medium">Take Quiz</span>
+                </Button>
+              </CardFooter>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <div className="text-center py-12 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg border border-dashed border-blue-200">
+          <div className="mb-6">
+            <div className="w-20 h-20 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-4">
+              <FileText className="h-10 w-10 text-white" />
+            </div>
+          </div>
+          <h3 className="text-xl font-semibold text-gray-900 mb-3">
+            {searchQuery ? "No matching lessons found" : "Lessons Coming Soon!"}
+          </h3>
+          <p className="text-gray-600 mb-6 max-w-md mx-auto">
+            {searchQuery
+              ? "Try a different search term to find the lessons you're looking for."
+              : "We're working hard to bring you amazing lessons. Check back soon for exciting new content!"}
+          </p>
+          {searchQuery ? (
+            <Button
+              variant="outline"
+              onClick={() => setSearchQuery("")}
+              className="bg-white hover:bg-gray-50"
+            >
+              Clear Search
+            </Button>
+          ) : (
+            <div className="flex items-center justify-center gap-2 text-sm text-blue-600">
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-pulse"></div>
+              <span>Stay tuned for updates</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default LessonView;

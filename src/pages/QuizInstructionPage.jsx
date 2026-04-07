@@ -1,0 +1,516 @@
+import React, { useState, useEffect } from "react";
+import { useParams, useSearchParams, useNavigate, useLocation } from "react-router-dom";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { ChevronLeft, Clock, BookOpen, AlertTriangle, Loader2, CheckCircle, Award, BarChart2 } from "lucide-react";
+import { 
+  getModuleQuizById, 
+  startQuizAttempt, 
+  getQuizMetaById,
+  fetchQuizAdminQuestions,
+  getQuizById 
+} from "@/services/quizServices";
+import { toast } from "sonner";
+
+function QuizInstructionPage() {
+  const { quizId } = useParams();
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const moduleId = searchParams.get('module');
+  const category = searchParams.get('category');
+  
+  const [agreed, setAgreed] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isStarting, setIsStarting] = useState(false);
+  const [quizData, setQuizData] = useState(null);
+  const [error, setError] = useState("");
+  const [showEmptyQuizModal, setShowEmptyQuizModal] = useState(false);
+
+  useEffect(() => {
+    const fetchQuizData = async () => {
+      try {
+        setIsLoading(true);
+        // Base quiz data (from state or API)
+        let base = location.state && location.state.quiz
+          ? location.state.quiz
+          : null;
+
+        // If no quiz data from state, try to fetch from API
+        if (!base && quizId) {
+          try {
+            // Try to get quiz by ID first
+            base = await getQuizById(quizId);
+            // Normalize the response structure
+            if (base && typeof base === 'object') {
+              // Check if data is wrapped
+              base = base.data || base;
+            }
+          } catch (getByIdError) {
+            console.log('getQuizById failed, trying getModuleQuizById:', getByIdError);
+            // Fallback to module quiz endpoint if available
+            if (moduleId) {
+              try {
+                base = await getModuleQuizById(moduleId, quizId);
+              } catch (moduleError) {
+                console.log('getModuleQuizById also failed:', moduleError);
+              }
+            }
+          }
+        }
+
+        // Always fetch meta for accurate counts/scores
+        let meta = null;
+        try {
+          meta = await getQuizMetaById(quizId);
+          // Normalize meta response
+          if (meta && typeof meta === 'object') {
+            meta = meta.data || meta;
+          }
+        } catch (metaError) {
+          console.log('getQuizMetaById failed:', metaError);
+        }
+
+        setQuizData({
+          ...(base || {}),
+          ...(meta || {}),
+        });
+      } catch (err) {
+        console.error('Error fetching quiz:', err);
+        setError('Failed to load quiz data');
+        toast.error('Failed to load quiz instructions');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    if (quizId) {
+      fetchQuizData();
+    }
+  }, [quizId, moduleId, location.state]);
+
+  // Consolidated instructions
+  const instructions = [
+    ` Time Limit: Unlimited`,
+    ` Questions: ${quizData?.questionCount || quizData?.question_count || 'Multiple'} questions of various types`,
+    ` Passing Score: ${quizData?.passingScore || quizData?.min_score || 70}% required`,
+    ` Attempts: ${quizData?.maxAttempts ?? quizData?.maxAttempts === 0 ? quizData?.maxAttempts : (quizData?.max_attempts || 3)} attempts allowed`,
+    ` Total Score: ${quizData?.totalScore ?? quizData?.max_score ?? '-'}`,
+    " Your progress will be saved automatically",
+    " No changes allowed after submission",
+    " Ensure stable internet connection during the quiz"
+  ];
+
+  const handleStartQuiz = async () => {
+    if (!agreed) {
+      toast.error('Please agree to the terms before starting the quiz.');
+      return;
+    }
+    try {
+      setIsStarting(true);
+      
+      // Start the quiz session - this should return quiz data including questions
+      const startResponse = await startQuizAttempt(quizId);
+      console.log('Quiz started - Full response:', startResponse);
+      console.log('Response structure:', {
+        hasQuestions: !!startResponse.questions,
+        hasQuiz: !!startResponse.quiz,
+        hasData: !!startResponse.data,
+        keys: Object.keys(startResponse || {}),
+        questionsType: typeof startResponse?.questions,
+        questionsLength: startResponse?.questions?.length
+      });
+      
+      // Try to get questions from multiple possible sources
+      let questions = [];
+      
+      // 1. Check if questions are in the start response
+      if (startResponse.questions && Array.isArray(startResponse.questions)) {
+        questions = startResponse.questions;
+        console.log('Questions found in start response');
+        console.log('Sample question structure:', questions[0]);
+      } else if (startResponse.quiz && startResponse.quiz.questions) {
+        questions = startResponse.quiz.questions;
+        console.log('Questions found in start response.quiz');
+        console.log('Sample question structure:', questions[0]);
+      } else if (startResponse.data && startResponse.data.questions) {
+        questions = startResponse.data.questions;
+        console.log('Questions found in start response.data');
+        console.log('Sample question structure:', questions[0]);
+      }
+      
+      // 2. If no questions in start response, try to get from existing quiz data
+      if (questions.length === 0 && quizData?.questions) {
+        questions = quizData.questions;
+        console.log('Questions found in existing quiz data');
+      }
+      
+      // 3. If still no questions, try to fetch them from the module quiz endpoint
+      if (questions.length === 0) {
+        try {
+          console.log('Attempting to fetch questions from module quiz endpoint...');
+          const moduleQuizData = await getModuleQuizById(moduleId, quizId);
+          if (moduleQuizData?.questions) {
+            questions = moduleQuizData.questions;
+            console.log('Questions found in module quiz data');
+          }
+        } catch (moduleError) {
+          console.log('Module quiz endpoint failed:', moduleError);
+        }
+      }
+      
+      // 4. If still no questions, try to fetch directly from the admin questions API
+      if (questions.length === 0) {
+        try {
+          console.log('Attempting to fetch questions from admin questions API...');
+          const adminQuestions = await fetchQuizAdminQuestions(quizId);
+          if (Array.isArray(adminQuestions) && adminQuestions.length > 0) {
+            questions = adminQuestions;
+            console.log('Questions found in admin questions API:', adminQuestions.length, 'questions');
+          } else {
+            console.log('Admin questions API returned empty array or no questions');
+          }
+        } catch (adminError) {
+          console.log('Admin questions API failed:', adminError);
+        }
+      }
+      
+      // Normalize question objects to ensure consistent fields (id, type, options, question/text)
+      const normalizeQuestion = (q, index) => {
+        const normalizedId =
+          q?.id || q?._id || q?.question_id || q?.questionId || `${index + 1}`;
+        
+        // Handle question text - backend may use 'text' or 'question'
+        const questionText = q?.question || q?.text || q?.questionText || '';
+        
+        // Get the question type from the backend field 'question_type' or fallback to 'type'
+        const rawType = q?.question_type || q?.type || q?.questionType || q?.kind || "";
+        
+        // Map backend question types to frontend types
+        let normalizedType = "";
+        if (rawType) {
+          switch (rawType.toUpperCase()) {
+            case 'MCQ':
+              normalizedType = 'mcq';
+              break;
+            case 'SCQ':
+              normalizedType = 'scq';
+              break;
+            case 'TRUE_FALSE':
+              normalizedType = 'truefalse';
+              break;
+            case 'FILL_UPS':
+              normalizedType = 'fill_blank';
+              break;
+            case 'ONE_WORD':
+              normalizedType = 'one_word';
+              break;
+            default:
+              normalizedType = rawType.toLowerCase();
+          }
+        }
+        
+        // If no type found, infer from structure
+        if (!normalizedType) {
+          if (Array.isArray(q?.options) && q.options.length > 0) {
+            normalizedType = "mcq";
+          } else if (q?.options === null || q?.options === undefined) {
+            // Backend sends null options for non-MCQ questions
+            // Use the backend question_type if available, don't default to descriptive
+            if (rawType) {
+              switch (rawType.toUpperCase()) {
+                case 'ONE_WORD':
+                  normalizedType = 'one_word';
+                  break;
+                case 'FILL_UPS':
+                  normalizedType = 'fill_blank';
+                  break;
+                case 'TRUE_FALSE':
+                  normalizedType = 'truefalse';
+                  break;
+                case 'SCQ':
+                  normalizedType = 'scq';
+                  break;
+                default:
+                  normalizedType = rawType.toLowerCase();
+              }
+            } else {
+              normalizedType = "descriptive";
+            }
+          } else {
+            normalizedType = "descriptive";
+          }
+        }
+        
+        // Prefer a unified options array if present under different keys
+        const unifiedOptions =
+          q?.options || q?.choices || q?.answerOptions || null;
+
+        const normalizedQuestion = {
+          ...q,
+          id: normalizedId,
+          type: normalizedType,
+          question: questionText, // Ensure 'question' field exists for consistency
+          text: questionText, // Keep 'text' for backward compatibility
+          options: unifiedOptions ?? q?.options,
+        };
+        
+        console.log('Normalized question:', {
+          originalType: q?.question_type || q?.type,
+          normalizedType: normalizedType,
+          options: normalizedQuestion.options,
+          id: normalizedQuestion.id
+        });
+        
+        return normalizedQuestion;
+      };
+
+      if (questions.length > 0) {
+        questions = questions.map((q, idx) => normalizeQuestion(q, idx));
+        console.log("Normalized questions:", questions);
+        console.log("Question types found:", questions.map(q => ({ 
+          id: q.id, 
+          type: q.type, 
+          backendType: q.question_type,
+          options: q.options,
+          hasOptions: Array.isArray(q.options) && q.options.length > 0
+        })));
+      }
+
+      // 5. Final check - if we still have no questions, show modal and stop
+      if (questions.length === 0) {
+        console.error('No questions found in any source:', {
+          startResponse,
+          quizData,
+          moduleId,
+          quizId,
+          adminQuestionsAttempted: true
+        });
+        setShowEmptyQuizModal(true);
+        return;
+      }
+      
+      console.log('Quiz questions loaded successfully:', questions.length, 'questions');
+      
+      // Navigate to quiz take page with questions data
+      navigate(`/dashboard/quiz/take/${quizId}?module=${moduleId}&category=${category}`, { 
+        state: { 
+          questions,
+          quizSession: startResponse,
+          startedAt: new Date().toISOString()
+        } 
+      });
+    } catch (err) {
+      console.error('Error starting quiz:', err);
+      toast.error('Failed to start quiz. Please try again.');
+    } finally {
+      setIsStarting(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center space-y-4">
+          <Loader2 className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-600 mx-auto" />
+          <p className="text-gray-600 text-lg">Loading quiz instructions...</p>
+          <p className="text-sm text-gray-500">Preparing your assessment</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !quizData) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center space-y-4 max-w-md">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-red-100 rounded-full mb-4 mx-auto">
+            <AlertTriangle className="h-10 w-10 text-red-600" />
+          </div>
+          <h3 className="text-xl font-medium text-gray-900">Failed to load quiz</h3>
+          <p className="text-gray-600 mb-6">{error || 'Quiz not found'}</p>
+          <div className="space-x-3">
+            <Button onClick={() => navigate(-1)}>Go Back</Button>
+            <Button variant="outline" onClick={() => window.location.reload()}>
+              Try Again
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container py-8 max-w-4xl mx-auto">
+      {/* Empty Quiz Modal */}
+      {showEmptyQuizModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => { setShowEmptyQuizModal(false); navigate(-1); }} />
+          <div className="relative z-10 w-full max-w-md mx-auto">
+            <Card className="overflow-hidden border border-gray-200 shadow-xl">
+              <CardHeader className="bg-indigo-50 border-b border-indigo-100">
+                <CardTitle className="text-indigo-700 flex items-center gap-2">
+                  <AlertTriangle className="h-5 w-5 text-indigo-600" />
+                  No Questions Available
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-6 space-y-4">
+                <p className="text-gray-700">
+                  This quiz contains no questions at the moment. Please go back and attempt another assessment.
+                </p>
+                <div className="flex justify-end gap-3">
+                  <Button variant="outline" onClick={() => setShowEmptyQuizModal(false)}>
+                    Stay
+                  </Button>
+                  <Button className="bg-indigo-600 hover:bg-indigo-700" onClick={() => navigate(-1)}>
+                    Go Back
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      )}
+      {/* Header */}
+      <div className="flex items-center justify-between mb-8">
+        <Button variant="outline" onClick={() => navigate(-1)} className="border-gray-300">
+          <ChevronLeft className="mr-2 h-4 w-4" />
+          Back to Assessments
+        </Button>
+        <Badge variant={category === 'general' ? 'outline' : 'default'} className="px-4 py-1.5">
+          {category === 'general' ? 'Practice Quiz' : 'Assessment Quiz'}
+        </Badge>
+      </div>
+
+      {/* Quiz Info Card */}
+      <Card className="mb-6 overflow-hidden shadow-sm border border-gray-200">
+        <CardContent className="p-6 bg-gradient-to-r from-indigo-50 to-blue-50">
+          <div className="flex flex-col md:flex-row gap-6">
+            <div className="flex-shrink-0 w-16 h-16 bg-gradient-to-br from-indigo-600 to-blue-600 rounded-lg shadow-sm flex items-center justify-center">
+              <BookOpen className="h-8 w-8 text-white" />
+            </div>
+            <div className="flex-1">
+              <h1 className="text-2xl font-bold text-gray-900 mb-2">
+                {quizData.title || `Quiz ${quizId}`}
+              </h1>
+              <p className="text-gray-700 mb-4">
+                {quizData.description || 'Test your knowledge with this comprehensive quiz'}
+              </p>
+              
+              {/* Quiz Details (Duration moved to instructions) */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="flex items-center gap-2 p-3 bg-white rounded-lg border border-gray-200">
+                  <BookOpen className="h-5 w-5 text-blue-600" />
+                  <div>
+                    <p className="text-sm text-gray-600">Questions</p>
+                    <p className="font-bold">{quizData.questionCount ?? quizData.question_count ?? '-'}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 p-3 bg-white rounded-lg border border-gray-200">
+                  <Award className="h-5 w-5 text-green-600" />
+                  <div>
+                    <p className="text-sm text-gray-600">Min Score</p>
+                    <p className="font-bold">{quizData.min_score ?? 70}%</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 p-3 bg-white rounded-lg border border-gray-200">
+                  <BarChart2 className="h-5 w-5 text-purple-600" />
+                  <div>
+                    <p className="text-sm text-gray-600">Attempts</p>
+                    <p className="font-bold">{quizData.maxAttempts ?? quizData.max_attempts ?? '-'}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 p-3 bg-white rounded-lg border border-gray-200">
+                  <Award className="h-5 w-5 text-amber-600" />
+                  <div>
+                    <p className="text-sm text-gray-600">Total Score</p>
+                    <p className="font-bold">{quizData.totalScore ?? quizData.max_score ?? '-'}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Instructions */}
+      <Card className="mb-6 border border-gray-200">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-xl font-bold flex items-center gap-2">
+            <BookOpen className="h-5 w-5 text-indigo-600" />
+            Quick Instructions
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {instructions.map((instruction, index) => (
+              <div key={index} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                <div className="flex-shrink-0 w-5 h-5 bg-indigo-600 text-white rounded-full flex items-center justify-center text-xs font-bold mt-0.5">
+                  {index + 1}
+                </div>
+                <p className="text-gray-700 text-sm">{instruction}</p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Terms Agreement */}
+      <Card className="mb-6 border border-gray-200">
+        <CardContent className="p-6">
+          <div className="flex items-start gap-3">
+            <Checkbox
+              id="terms"
+              checked={agreed}
+              onCheckedChange={(checked) => setAgreed(checked)}
+              className="mt-0.5"
+            />
+            <Label htmlFor="terms" className="text-sm leading-relaxed cursor-pointer">
+              I agree to complete this quiz independently without any external assistance and understand 
+              that my answers cannot be changed after submission.
+            </Label>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Action Buttons */}
+      <div className="flex flex-col-reverse md:flex-row items-center justify-between gap-4">
+        <Button variant="outline" onClick={() => navigate(-1)} className="w-full md:w-auto">
+          <ChevronLeft className="mr-2 h-4 w-4" />
+          Back to Assessments
+        </Button>
+        
+        <Button 
+          onClick={handleStartQuiz}
+          disabled={!agreed || isStarting}
+          className="w-full md:w-auto bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white px-6 py-3 font-medium shadow-sm"
+        >
+          {isStarting ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Starting Quiz...
+            </>
+          ) : (
+            <>
+              <BookOpen className="mr-2 h-4 w-4" />
+              Start Quiz Now
+            </>
+          )}
+        </Button>
+      </div>
+
+      {/* Warning */}
+      {!agreed && (
+        <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg flex items-center gap-2 text-yellow-800">
+          <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+          <span className="text-sm">Please agree to the terms before starting the quiz.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default QuizInstructionPage;

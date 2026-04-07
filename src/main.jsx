@@ -1,0 +1,29 @@
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import App from './App.jsx';
+import './index.css';
+import { Toaster as SonnerToaster } from 'sonner'; // Aliased to avoid confusion with shadcn Toaster
+
+// Initialize API client interceptors by importing once
+import '@/services/apiClient';
+
+createRoot(document.getElementById('root')).render(
+  <BrowserRouter
+    future={{
+      v7_startTransition: true,
+      v7_relativeSplatPath: true,
+    }}
+  >
+    <App />
+    <SonnerToaster
+      position="top-right"
+      closeButton
+      richColors
+      theme="light" // Changed from "system" to "light"
+      toastOptions={{
+        duration: 4000,
+        className: 'rounded-md border shadow-lg',
+      }}
+    />
+  </BrowserRouter>
+);
